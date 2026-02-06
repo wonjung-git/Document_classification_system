@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+venv/
+
+# Model files (DO NOT COMMIT)
+model/
+*.safetensors
+
+# OS / IDE
+.vscode/
+.DS_Store
