@@ -4,3 +4,5 @@
 -등급 기준-
 문서 처리의 소요시간과 중요성을 Only-Encoder transfomer계열 모델을 이용해 분류함.
 모델은 공개X
+
+최신버전: v1.0 [다운로드](https://github.com/wonjung-git/Document_classification_system/releases/tag/v1.0)
