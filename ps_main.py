@@ -784,13 +784,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("문서 처리 등급 분류 도구")
         self.setWindowIcon(QIcon(resource_path("assets/icon.ico")))
         self.resize(1200, 700)
-        
-        self.init_model()
+
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None; self.model = None
         self.current_df = None; self.final_df = None; self.selected_mode = None
         self.mapped_dept_col = "없음"
+        
+        self.init_model()
         
         self.central_stacked = QStackedWidget()
         self.setCentralWidget(self.central_stacked)
