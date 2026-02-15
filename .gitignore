@@ -13,3 +13,7 @@ model/
 # OS / IDE
 .vscode/
 .DS_Store
+
+dist/
+build/
+installer/Output/

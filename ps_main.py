@@ -10,8 +10,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFileDialog, QMessageBox, QRadioButton, 
                              QTableWidget, QTableWidgetItem, 
                              QHeaderView, QComboBox, QDialog, QProgressDialog, QSpinBox, QLineEdit, QAbstractItemView)
-from PySide6.QtCore import Qt, Signal, QThread, QEvent
-from PySide6.QtGui import QCursor, QFont, QColor, QIcon, QPixmap, QKeySequence
+from PySide6.QtCore import Qt, Signal, QThread, QEvent, QSize
+from PySide6.QtGui import QCursor, QFont, QColor, QIcon, QPixmap, QKeySequence, QPainter
 import ctypes
 import string
 from tokenization_kobert import KoBertTokenizer
@@ -25,8 +25,23 @@ def resource_path(relative_path):
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
-ML_ICON_PATH = resource_path("assets/ml_icon.png")
-SEARCH_ICON_PATH = resource_path("assets/search_icon.png")
+# --- 이미지 화질 좋아지는 함수 ---
+def hd_pixmap(ref_widget, path: str, logical_px: int) -> QPixmap:
+    dpr = ref_widget.devicePixelRatioF()
+    pm = QPixmap(path)
+    if pm.isNull():
+        return QPixmap()
+
+    pm = pm.scaled(int(logical_px * dpr), int(logical_px * dpr),
+                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    pm.setDevicePixelRatio(dpr)
+    return pm
+
+ML_ICON_PATH = resource_path("assets/ml_icon.png") #1p
+SEARCH_ICON_PATH = resource_path("assets/search_icon.png") #1p
+TITLE_ICON_PATH = resource_path("assets/title_icon.png") #2p
+DOC_ICON_PATH = resource_path("assets/doc_icon.png") #2p
+DASH_ICON_PATH = resource_path("assets/dash_icon.png") #2p
 
 
 # --- 직위별 가중치 설정 ---
@@ -41,32 +56,28 @@ POSITION_WEIGHTS = {
 }
 
 
-# --- 등급 조정(Quota) 방식: 교수님 예시 코드 그대로 사용 ---
+# --- 등급 조정 방식 ---
 class QuotaAllocator:
     def __init__(self, df, prob_cols=("A", "B", "C", "D"), ignored_label="-"):
         self.df = df.copy()
         self.prob_cols = list(prob_cols)
         self.ignored_label = ignored_label
 
-        # Coerce to numeric; strings like "-" become NaN
         for c in self.prob_cols:
             self.df[c] = pd.to_numeric(self.df[c], errors="coerce")
 
-        # Valid rows = all probs present and numeric
         self.valid_mask = self.df[self.prob_cols].notna().all(axis=1)
 
-        # Rank score (only for valid rows)
         weights = np.array([4.0, 3.0, 2.0, 1.0], dtype=float)
         self.df["rank_score"] = np.nan
         self.df.loc[self.valid_mask, "rank_score"] = (
             self.df.loc[self.valid_mask, self.prob_cols].to_numpy(dtype=float) @ weights
         )
 
-        # Initialize assigned_grade
         self.df["assigned_grade"] = self.ignored_label
 
     def assign(self, class_number=None, percentages=None, labels=None):
-        # 1) Percentages default
+
         if percentages is None:
             if class_number is None:
                 raise ValueError("Must specify either 'percentages' or 'class_number'.")
@@ -77,21 +88,19 @@ class QuotaAllocator:
         if abs(sum(percentages) - 100) > 1e-5:
             raise ValueError(f"Percentages must sum to 100. Sum is {sum(percentages)}")
 
-        # 2) Labels default
         if labels is None:
             labels = [string.ascii_uppercase[i] for i in range(class_number)]
         if len(labels) != class_number:
             raise ValueError(f"Number of labels ({len(labels)}) must match classes ({class_number}).")
 
-        # 3) Allocate only among valid rows
         valid_df = self.df.loc[self.valid_mask].sort_values("rank_score", ascending=False)
         n = len(valid_df)
         if n == 0:
-            return self.df["assigned_grade"]  # nothing to assign
+            return self.df["assigned_grade"]
 
         cumulative_pct = np.cumsum(percentages)
         cut_indices = [int(p / 100 * n) for p in cumulative_pct]
-        cut_indices[-1] = n  # ensure last reaches end
+        cut_indices[-1] = n
 
         start = 0
         for end, label in zip(cut_indices, labels):
@@ -104,7 +113,7 @@ class QuotaAllocator:
 
 # --- 분석 로직 쓰레드 ---
 
-# --- 키워드 분류(교수님 v3.py 로직 기반) ---
+# --- 키워드 분류 ---
 def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra_dict=None, default=None):
     """
     Classifies observations based on keywords and optional extra column rules efficiently.
@@ -130,24 +139,19 @@ def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra
         def tqdm(x, **kwargs):
             return x
 
-    # 0. Handle Keyword Input (Dict or DataFrame)
     if isinstance(keyword_dict, pd.DataFrame):
-        # Assume first column is keyword, second is grade
         kw_col = keyword_dict.columns[0]
         grade_col = keyword_dict.columns[1]
 
-        # Check for duplicates
         duplicates = keyword_dict[keyword_dict.duplicated(subset=[kw_col], keep='first')]
         if not duplicates.empty:
             for key in duplicates[kw_col].unique():
                 kept_grade = keyword_dict.loc[keyword_dict[kw_col] == key, grade_col].iloc[0]
                 print(f"{key} 키워드가 중복됩니다. {key} 키워드는 먼저 입력한 {kept_grade}로 처리됩니다.")
 
-        # Convert to dictionary (keeping first occurrence)
         keyword_dict = keyword_dict.drop_duplicates(subset=[kw_col], keep='first')
         keyword_dict = dict(zip(keyword_dict[kw_col], keyword_dict[grade_col]))
 
-    # 0.1 Handle Extra Dict Input (Values can be Dict or DataFrame)
     if mode == 'extra' and extra_dict is not None:
         if isinstance(extra_dict, pd.DataFrame):
             kw_col = extra_dict.columns[0]
@@ -162,7 +166,6 @@ def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra
             extra_dict = extra_dict.drop_duplicates(subset=[kw_col], keep='first')
             extra_dict = dict(zip(extra_dict[kw_col], extra_dict[grade_col]))
 
-    # 1. Setup Ranks (A-Z based on dict values)
     all_grades = set(keyword_dict.values()) if keyword_dict else set()
     if mode == 'extra' and extra_dict is not None:
         all_grades.update(extra_dict.values())
@@ -173,14 +176,12 @@ def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra
     grade_to_rank = {g: i + 1 for i, g in enumerate(unique_grades)}
     rank_to_grade = {i + 1: g for i, g in enumerate(unique_grades)}
 
-    # 2. Keyword Matching (Vectorized)
     grade_to_keywords = {}
     for k, v in keyword_dict.items():
         grade_to_keywords.setdefault(v, []).append(re.escape(str(k).replace(' ', '')))
 
     match_matrix = pd.DataFrame(index=df.index)
 
-    # Remove blanks from target column for matching
     target_series = df[target_col].astype(str).str.replace(' ', '', regex=False)
 
     for grade in tqdm(unique_grades, desc="Keyword Matching"):
@@ -191,7 +192,6 @@ def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra
         else:
             match_matrix[grade] = False
 
-    # 3. Decision Logic
     rank_matrix = pd.DataFrame(index=df.index)
     for grade in unique_grades:
         rank = grade_to_rank[grade]
@@ -236,6 +236,7 @@ def keyword_classifier(df, target_col, keyword_dict, mode, extra_col=None, extra
         raise ValueError(f"Unknown mode: {mode}")
 
     return final_rank.map(rank_to_grade).fillna(default)
+
 class AnalysisThread(QThread):
     finished_signal = Signal(pd.DataFrame)
     error_signal = Signal(str)
@@ -284,8 +285,6 @@ class AnalysisThread(QThread):
             ml_suffix = "(머신러닝)" if self.mode == "키워드 방식" else ""
 
             if self.mode == "키워드 방식":
-                # 교수님 v3.py 기반 키워드 분류 로직 적용
-                # - 기본은 "상위 등급 우선(higher)"으로 처리 (기존 UX 유지 + 등급 확장 지원)
                 if self.keyword_dict:
                     p_col = self.mapping.get('extra_col', '')
 
@@ -301,7 +300,6 @@ class AnalysisThread(QThread):
                     matched_mask = kw_series.notna()
                     df.loc[matched_mask, "최종 예측 결과"] = kw_series[matched_mask].astype(str)
 
-                    # 기존 호환: A~D 확률 컬럼은 해당 등급인 경우 1.0 처리
                     for g in ["A", "B", "C", "D"]:
                         df.loc[matched_mask & (df["최종 예측 결과"] == g), g] = 1.0
                 self.progress_signal.emit(30)
@@ -363,14 +361,13 @@ class AnalysisThread(QThread):
                     prog = 30 + int(((i + len(batch_texts)) / len(target_texts)) * 65)
                     self.progress_signal.emit(min(prog, 95))
 
-                # --- 분류 개수 지정 예측(Quota) 옵션 적용: 교수님 예시 코드 그대로 사용 ---
+                # --- 분류 개수 지정 예측 ---
                 if (self.mode != "키워드 방식") and (self.ml_options.get("strategy") == "quota"):
                     allocator = QuotaAllocator(df)
                     if self.ml_options.get("percentages") is not None:
                         df["최종 예측 결과"] = allocator.assign(percentages=self.ml_options["percentages"])
                     else:
                         df["최종 예측 결과"] = allocator.assign(class_number=self.ml_options.get("class_number"))
-                    # 확률이 있는 경우만 suffix 적용 필요 없음(머신러닝 방식은 suffix 없음)
             if 'combined_input' in df.columns: df.drop(columns=['combined_input'], inplace=True)
             self.progress_signal.emit(100)
             self.finished_signal.emit(df)
@@ -390,10 +387,10 @@ class ModeCard(QFrame):
         self.icon_lbl.setStyleSheet("background-color: #C2D6F9; border-radius: 10px; font-size: 50px;")
 
         # 이미지 로드 및 예외 처리 (없을 시 검정색)
-        pixmap = QPixmap(icon_path)
-        if not pixmap.isNull():
+        pm = hd_pixmap(self.icon_lbl, icon_path, 50)
+        if not pm.isNull():
             # 이미지 크기를 레이블 크기에 맞춰 조절
-            self.icon_lbl.setPixmap(pixmap.scaled(50, 50, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            self.icon_lbl.setPixmap(pm)
         else:
             self.icon_lbl.setStyleSheet("background-color: #C2D6F9; border-radius: 10px; color: black;")
             self.icon_lbl.setText("No Image") 
@@ -408,7 +405,7 @@ class ModeCard(QFrame):
     def mousePressEvent(self, e): self.clicked.emit(self)
 
 
-# --- 머신러닝 예측 옵션 다이얼로그 (교수님 요청사항) ---
+# --- 머신러닝 예측 옵션 다이얼로그 ---
 class MLOptionsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -498,7 +495,6 @@ class MLOptionsDialog(QDialog):
             self.accept()
             return
 
-        # quota mode
         class_number = int(self.spin_classes.value())
 
         if self.rb_equal.isChecked():
@@ -530,7 +526,7 @@ class MLOptionsDialog(QDialog):
     def get_options(self):
         return self.options
 
-# --- 키워드기반 예측 옵션 다이얼로그 (교수님 요청사항) ---
+# --- 키워드기반 예측 옵션 다이얼로그 ---
 class KeywordOptionsDialog(QDialog):
     
     def __init__(self, parent=None):
@@ -632,11 +628,10 @@ class PositionMappingDialog(QDialog):
         """)
         layout.addWidget(self.table)
 
-        # 버튼 줄
         row = QHBoxLayout()
         self.btn_add = QPushButton("＋ 행 추가")
-        self.btn_del = QPushButton("🗑 선택 삭제")
-        self.btn_load = QPushButton("📥 엑셀/CSV 업로드")
+        self.btn_del = QPushButton("선택 삭제")
+        self.btn_load = QPushButton("엑셀/CSV 업로드")
 
         for b in (self.btn_add, self.btn_del, self.btn_load):
             b.setStyleSheet("QPushButton { background-color: #E5E7EB; color: #111827; border-radius: 10px; padding: 8px 12px; }")
@@ -651,7 +646,6 @@ class PositionMappingDialog(QDialog):
         row.addWidget(self.btn_load)
         layout.addLayout(row)
 
-        # 하단
         btns = QHBoxLayout()
         btns.addStretch()
         self.btn_cancel = QPushButton("취소")
@@ -692,7 +686,6 @@ class PositionMappingDialog(QDialog):
         if not text.strip():
             return
 
-        # 들어갈 시작 행(선택된 행이 있으면 거기부터, 없으면 맨 아래 추가)
         start_row = self.table.currentRow()
         if start_row < 0:
             start_row = self.table.rowCount()
@@ -700,7 +693,6 @@ class PositionMappingDialog(QDialog):
         lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
         r = start_row
         for ln in lines:
-            # 탭(엑셀 복붙) 우선, 없으면 콤마, 없으면 공백
             if "\t" in ln:
                 a, b = ln.split("\t", 1)
             elif "," in ln:
@@ -736,7 +728,6 @@ class PositionMappingDialog(QDialog):
 
             df.columns = [str(c).strip() for c in df.columns]
 
-            # 컬럼 자동탐색(직위/등급) → 없으면 앞 2열 사용
             pos_col = next((c for c in ["직위", "직위명", "position", "Position"] if c in df.columns), None)
             grd_col = next((c for c in ["등급", "grade", "Grade", "단계"] if c in df.columns), None)
             if pos_col is None or grd_col is None:
@@ -744,7 +735,6 @@ class PositionMappingDialog(QDialog):
                     raise ValueError("최소 2개 컬럼(직위/등급)이 필요합니다.")
                 pos_col, grd_col = df.columns[0], df.columns[1]
 
-            # 테이블 초기화 후 채우기
             self.table.setRowCount(0)
             count = 0
             for _, row in df.iterrows():
@@ -782,7 +772,6 @@ class PositionMappingDialog(QDialog):
             g = "" if g_item is None else str(g_item.text()).strip()
             if not p or not g:
                 continue
-            # 중복이면 먼저 입력한 걸 유지(원하면 나중걸로 덮어쓰게 바꿀 수도 있음)
             if p not in mapping:
                 mapping[p] = g
         return mapping
@@ -796,12 +785,12 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(resource_path("assets/icon.ico")))
         self.resize(1200, 700)
         
+        self.init_model()
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = None; self.model = None
         self.current_df = None; self.final_df = None; self.selected_mode = None
         self.mapped_dept_col = "없음"
-        
-        self.init_model()
         
         self.central_stacked = QStackedWidget()
         self.setCentralWidget(self.central_stacked)
@@ -812,6 +801,7 @@ class MainWindow(QMainWindow):
         self.central_stacked.addWidget(self.init_screen)
         self.central_stacked.addWidget(self.main_work_screen)
         self.extra_dict = None
+        self._kw_default_seeded = False
 
     def init_model(self):
         model_path = None
@@ -827,7 +817,6 @@ class MainWindow(QMainWindow):
                 model_path, num_labels=4
             ).to(self.device)
 
-            # 토크나이저 로드: 교수님 모델(koBERT 방식) 자동 감지
             vocab_file = os.path.join(model_path, "tokenizer_78b3253a26.model")
             vocab_txt = os.path.join(model_path, "vocab.txt")
 
@@ -857,6 +846,24 @@ class MainWindow(QMainWindow):
             self.tokenizer = None
             self.model = None
 
+    def colored_icon(self, ref_widget, path, color_hex):
+        size = ref_widget.iconSize().width() or 17
+        pm = hd_pixmap(ref_widget, path, size)
+        if pm.isNull():
+            return QIcon()
+
+        colored = QPixmap(pm.size())
+        colored.setDevicePixelRatio(pm.devicePixelRatioF())
+        colored.fill(Qt.transparent)
+
+        p = QPainter(colored)
+        p.drawPixmap(0, 0, pm)
+        p.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        p.fillRect(colored.rect(), QColor(color_hex))
+        p.end()
+
+        return QIcon(colored)
+
     def setup_init_screen(self):
         self.init_screen = QWidget(); layout = QVBoxLayout(self.init_screen); layout.setContentsMargins(50, 70, 50, 40)
         header = QLabel("문서 처리 등급 분류 도구"); header.setAlignment(Qt.AlignCenter); header.setStyleSheet("font-size: 36px; font-weight: bold; color: #111827; margin-bottom: 8px;")
@@ -871,23 +878,41 @@ class MainWindow(QMainWindow):
         self.start_btn.setStyleSheet("QPushButton { background-color: #2563EB; color: white; font-size: 18px; font-weight: bold; border-radius: 12px; margin-top: 40px; } QPushButton:disabled { background-color: #D1D1D1; }")
         self.start_btn.clicked.connect(self.go_to_config)
         layout.addWidget(header); layout.addWidget(sub_header); layout.addLayout(cards_layout); layout.addWidget(self.start_btn, alignment=Qt.AlignCenter); layout.addStretch()
-        
-
 
     def setup_main_work_screen(self):
         self.main_work_screen = QWidget()
         main_h = QHBoxLayout(self.main_work_screen); main_h.setContentsMargins(0, 0, 0, 0); main_h.setSpacing(0)
 
         self.sidebar = QFrame(); self.sidebar.setFixedWidth(220)
-        self.sidebar.setStyleSheet("background-color: #F9FAFB; border-right: 1px solid #E5E7EB;")
+        self.sidebar.setStyleSheet("background-color: #FFFFFF; border-right: 1px solid #F3F3F3;")
         side_v = QVBoxLayout(self.sidebar); side_v.setContentsMargins(10, 30, 10, 20)
 
-        app_info = QLabel("공공문서 관리"); app_info.setStyleSheet("font-weight: bold; color: #111827; margin-bottom: 20px; font-size: 15px; padding-left: 10px;")
-        side_v.addWidget(app_info)
+        app_row = QHBoxLayout()
+        app_row.setContentsMargins(15, 0, 0, 0)
+        app_row.setSpacing(8)
+
+
+        app_icon = QLabel()
+        app_icon.setPixmap(hd_pixmap(app_icon, TITLE_ICON_PATH, 32))
+        app_icon.setFixedSize(32, 32)
+        app_icon.setAlignment(Qt.AlignVCenter)
+
+        app_info = QLabel("공공문서 관리")
+        app_info.setStyleSheet("font-weight: bold; color: #1F2937; font-size: 17px;")
+        app_info.setAlignment(Qt.AlignVCenter)
+
+        app_row.addWidget(app_icon, 0, Qt.AlignVCenter)
+        app_row.addWidget(app_info, 0, Qt.AlignVCenter)
+
+        side_v.addLayout(app_row)
+        side_v.addSpacing(25)
 
         # 메뉴 버튼 생성
-        self.menu_predict = QPushButton("📄 문서 관리")
-        self.menu_dashboard = QPushButton("📊 대시보드")
+        self.menu_predict = QPushButton(" 문서 관리")
+        self.menu_predict.setIconSize(QSize(18, 18))
+
+        self.menu_dashboard = QPushButton(" 대시보드")
+        self.menu_dashboard.setIconSize(QSize(18, 18))
         
         self.menu_buttons = [self.menu_predict, self.menu_dashboard]
 
@@ -901,8 +926,11 @@ class MainWindow(QMainWindow):
 
         side_v.addStretch()
 
-        reset_btn = QPushButton("↩ 처음 화면으로"); reset_btn.setFixedHeight(45)
-        reset_btn.setStyleSheet("color: #ef4444; border: 1px solid #fecaca; border-radius: 8px;")
+        reset_btn = QPushButton("↩ 처음 화면으로"); reset_btn.setFixedHeight(40)
+        reset_btn.setStyleSheet("""
+            QPushButton { background-color: #EBF2FB; color: #4B5563; border: 5px; border-radius: 5px; }
+            QPushButton:hover { background-color: #C2D6F9; }
+        """)
         reset_btn.clicked.connect(lambda: self.central_stacked.setCurrentIndex(0))
         side_v.addWidget(reset_btn)
 
@@ -917,15 +945,13 @@ class MainWindow(QMainWindow):
 
         main_h.addWidget(self.sidebar)
         main_h.addWidget(self.content_stack)
-        
-        # 초기 활성화 메뉴 설정 (문서 예측)
+
         self.update_menu_style(self.menu_predict)
 
     def update_menu_style(self, active_button):
-        """버튼의 위아래 여백(padding)을 늘리고 둥근 모서리를 더 강조"""
         for btn in self.menu_buttons:
             if btn == active_button:
-                # 활성화 상태: 연한 파랑 배경 + 굵은 파랑 글씨
+                # 활성화 상태: 연한 파랑 배경, 굵은 파랑 글씨
                 btn.setStyleSheet("""
                     QPushButton {
                         text-align: left; 
@@ -934,12 +960,16 @@ class MainWindow(QMainWindow):
                         border-radius: 12px; 
                         font-size: 15px; 
                         font-weight: bold;
-                        background-color: #E0E7FF; 
-                        color: #2563EB;
+                        background-color: #EBF2FB; 
+                        color: #537FDE;
                     }
                 """)
+                if btn == self.menu_predict:
+                    btn.setIcon(self.colored_icon(btn, DOC_ICON_PATH, "#537FDE"))
+                else:
+                    btn.setIcon(self.colored_icon(btn, DASH_ICON_PATH, "#537FDE"))
             else:
-                # 비활성화 상태: 투명 배경 + 회색 글씨
+                # 비활성화 상태: 투명 배경, 회색 글씨
                 btn.setStyleSheet("""
                     QPushButton {
                         text-align: left; 
@@ -947,35 +977,38 @@ class MainWindow(QMainWindow):
                         border: none; 
                         border-radius: 12px; 
                         font-size: 15px; 
-                        color: #6B7280; 
+                        color: #A1AABC; 
                         background-color: transparent;
                     }
                     QPushButton:hover { 
                         background-color: #F3F4F6; 
                     }
                 """)
+                if btn == self.menu_predict:
+                    btn.setIcon(self.colored_icon(btn, DOC_ICON_PATH, "#A1AABC"))
+                else:
+                    btn.setIcon(self.colored_icon(btn, DASH_ICON_PATH, "#A1AABC"))
 
     def change_menu(self, index):
-        """페이지 전환 및 스타일 즉시 반영"""
+        """페이지 전환"""
         if index == 1:
             self.update_and_show_dashboard()
-            self.update_menu_style(self.menu_dashboard)
         else:
             self.content_stack.setCurrentIndex(index)
             self.update_menu_style(self.menu_predict)
 
     def setup_predict_ui(self):
-        page = QWidget(); layout = QVBoxLayout(page)
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(20, 20, 20, 20)
         top = QHBoxLayout()
-        self.config_title = QLabel("데이터 분석 설정"); self.config_title.setStyleSheet("font-size: 22px; font-weight: bold;")
+        self.config_title = QLabel("데이터 분석 설정"); self.config_title.setStyleSheet("color: #1F2937; font-size: 22px; font-weight: bold;")
         self.rb_cp949 = QRadioButton("CP949(CSV)"); self.rb_utf8 = QRadioButton("UTF-8(Excel)"); self.rb_utf8.setChecked(True)
 
         # 설정 내보내기 버튼
         self.export_settings_btn = QPushButton("직위 키워드 내보내기")
-        self.export_settings_btn.setFixedHeight(34)
+        self.export_settings_btn.setFixedHeight(30)
         self.export_settings_btn.setStyleSheet("""
-            QPushButton { background-color: #E5E7EB; color: #111827; border-radius: 10px; padding: 6px 12px; }
-            QPushButton:hover { background-color: #DDE3EA; }
+            QPushButton { background-color: #C9CFDD; color: #1F2937; border-radius: 10px; padding: 6px 12px; }
+            QPushButton:hover { background-color: #A1AABC; }
         """)
         self.export_settings_btn.clicked.connect(self.export_position_mapping)
 
@@ -993,11 +1026,11 @@ class MainWindow(QMainWindow):
         kw_header_v.setSpacing(6)
 
         top_row = QHBoxLayout()
-        top_row.addWidget(QLabel("키워드별 등급 설정:"))
+        top_row.addWidget(QLabel(" 키워드별 등급 설정:"))
 
         self.grade_order_edit = QLineEdit("A,B,C,D")
         self.grade_order_edit.setPlaceholderText("등급 목록 (예: A,B,C,D,E,F)")
-        self.grade_order_edit.setFixedWidth(220)
+        self.grade_order_edit.setFixedWidth(200)
         self.grade_order_edit.editingFinished.connect(self.refresh_grade_comboboxes)
         top_row.addWidget(self.grade_order_edit)
 
@@ -1008,7 +1041,7 @@ class MainWindow(QMainWindow):
         bottom_row.addStretch()
 
 
-        # 키워드 내보내기 버튼: 업로드 바로 옆
+        # 키워드 내보내기 버튼
         export_kw_btn = QPushButton("키워드 내보내기")
         export_kw_btn.setFixedWidth(100)
         export_kw_btn.clicked.connect(self.export_keywords)
@@ -1042,9 +1075,16 @@ class MainWindow(QMainWindow):
         mid.addWidget(self.kw_container); mid.addLayout(pre_v, stretch=1)
         
         btns = QHBoxLayout()
-        self.upload_btn = QPushButton("📁 파일 불러오기"); self.upload_btn.setFixedHeight(50); self.upload_btn.clicked.connect(self.load_file)
-        self.analyze_btn = QPushButton("🚀 분석 및 예측 시작"); self.analyze_btn.setFixedHeight(50); self.analyze_btn.setEnabled(False)
-        self.analyze_btn.setStyleSheet("background-color: #059669; color: white; font-weight: bold; border-radius: 8px;")
+        self.upload_btn = QPushButton("파일 불러오기"); self.upload_btn.setFixedHeight(45); self.upload_btn.clicked.connect(self.load_file)
+        self.analyze_btn = QPushButton("분석 및 예측 시작"); self.analyze_btn.setFixedHeight(45); self.analyze_btn.setEnabled(False)
+        self.upload_btn.setStyleSheet("""
+            QPushButton {background-color: #FFFFFF; color: black; font-weight: bold; border-radius: 8px; }
+            QPushButton:hover {background-color: #F9F9F9;}
+        """)
+        self.analyze_btn.setStyleSheet("""
+            QPushButton { background-color: #2563EB; color: white; font-weight: bold; border-radius: 8px; }
+            QPushButton:disabled { background-color: #C2D6F9; color: white; }
+        """)
         self.analyze_btn.clicked.connect(self.show_mapping_dialog)
         btns.addWidget(self.upload_btn); btns.addWidget(self.analyze_btn)
         
@@ -1052,12 +1092,23 @@ class MainWindow(QMainWindow):
         return page
 
     def setup_dashboard_ui(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(30, 30, 30, 30)
+        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(20, 20, 20, 20)
         layout.addWidget(QLabel("문서 분류 요약 현황", styleSheet="font-size: 24px; font-weight: bold; margin-bottom: 15px;"))
         
         layout.addWidget(QLabel("전체 부서명별 등급 분포"))
-        self.stats_table = QTableWidget(); self.stats_table.setStyleSheet("background-color: white; border-radius: 10px;")
-        layout.addWidget(self.stats_table)
+        card = QFrame()
+        card.setAttribute(Qt.WA_StyledBackground, True)
+        card.setStyleSheet("QFrame{background:#fff;border:1px solid #E5E7EB;border-radius:10px;}")
+
+        card_l = QVBoxLayout(card)
+        card_l.setContentsMargins(2, 2, 2, 2)
+
+        self.stats_table = QTableWidget()
+        self.stats_table.setFrameShape(QFrame.NoFrame)
+        self.stats_table.setStyleSheet("QTableWidget{background:transparent;border:none;gridline-color: #E5E7EB;}")
+
+        card_l.addWidget(self.stats_table)
+        layout.addWidget(card)
 
         card_h = QHBoxLayout()
         self.card_top_dept = self.create_stat_card("최다 분류 부서", "-", "")
@@ -1071,14 +1122,19 @@ class MainWindow(QMainWindow):
     def setup_result_ui(self):
         page = QWidget(); layout = QVBoxLayout(page)
         self.res_table = QTableWidget()
-        save_btn = QPushButton("📊 결과 엑셀 저장"); save_btn.setFixedHeight(50); save_btn.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; border-radius: 10px;"); save_btn.clicked.connect(self.save_excel)
+        save_btn = QPushButton("결과 엑셀 저장"); save_btn.setFixedHeight(50); 
+        save_btn.setStyleSheet("""
+            QPushButton { background-color: #2563EB; color: white; font-weight: bold; border-radius: 10px; }
+            QPushButton:hover { background-color: #C2D6F9; }                   
+        """) 
+        save_btn.clicked.connect(self.save_excel)
         layout.addWidget(QLabel("최종 분석 결과", styleSheet="font-size: 20px; font-weight: bold;")); layout.addWidget(self.res_table); layout.addWidget(save_btn)
         return page
 
     def create_stat_card(self, title, val, sub):
         card = QFrame()
         card.setStyleSheet("""
-            QFrame { background-color: white; border: 1px solid #E5E7EB; border-radius: 12px; padding: 10px; }
+            QFrame { background-color: white; border: 1px solid #E5E7EB; border-radius: 10px; padding: 10px; }
         """)
         v = QVBoxLayout(card); v.setSpacing(2)
         
@@ -1097,105 +1153,108 @@ class MainWindow(QMainWindow):
         if self.final_df is None:
             QMessageBox.warning(self, "알림", "분석된 데이터가 없습니다. 먼저 분석을 완료해 주세요.")
             return
+        else :
+            self.update_menu_style(self.menu_dashboard)
+            df = self.final_df.copy()
+            res_col = "최종 예측 결과"
 
-        df = self.final_df.copy()
-        res_col = "최종 예측 결과"
+            dept_col = self.mapped_dept_col
+            if dept_col == "없음" or dept_col not in df.columns:
+                dept_col = df.columns[0]
 
-        dept_col = self.mapped_dept_col
-        if dept_col == "없음" or dept_col not in df.columns:
-            dept_col = df.columns[0]
+            # 데이터 집계 (부서별 등급 개수)
+            df["temp_grade"] = df[res_col].astype(str).str.strip().str[0]
 
-        # 데이터 집계 (부서별 등급 개수)
-        df["temp_grade"] = df[res_col].astype(str).str.strip().str[0]
+            summary = df.groupby([dept_col, "temp_grade"]).size().unstack(fill_value=0)
 
-        summary = df.groupby([dept_col, "temp_grade"]).size().unstack(fill_value=0)
+            if "미" in summary.columns:
+                summary = summary.rename(columns={"미": "미분류"})
 
-        if "미" in summary.columns:
-            summary = summary.rename(columns={"미": "미분류"})
+            # 등급 컬럼 목록 동적으로 구성 (합계 제외)
+            grade_cols = [c for c in summary.columns if c != "합계"]
 
-        # 등급 컬럼 목록 동적으로 구성 (합계 제외)
-        grade_cols = [c for c in summary.columns if c != "합계"]
+            # 정렬: A,B,C... 먼저, 그 외(미분류 등)는 뒤로
+            def grade_sort_key(x):
+                x = str(x)
+                if len(x) == 1 and x.isalpha():
+                    return (0, ord(x.upper()) - ord("A"))
+                if x == "미분류":
+                    return (2, 999)
+                return (1, x)
 
-        # 정렬: A,B,C... 먼저, 그 외(미분류 등)는 뒤로
-        def grade_sort_key(x):
-            x = str(x)
-            if len(x) == 1 and x.isalpha():
-                return (0, ord(x.upper()) - ord("A"))
-            if x == "미분류":
-                return (2, 999)
-            return (1, x)
+            grade_cols = sorted(grade_cols, key=grade_sort_key)
 
-        grade_cols = sorted(grade_cols, key=grade_sort_key)
+            # 합계 컬럼 추가
+            summary["합계"] = summary[grade_cols].sum(axis=1) if grade_cols else 0
 
-        # 합계 컬럼 추가
-        summary["합계"] = summary[grade_cols].sum(axis=1) if grade_cols else 0
+            # ---------- 테이블 설정 ----------
+            headers = ["부서명"] + [f"{g}등급" if g != "미분류" else "미분류" for g in grade_cols] + ["합계"]
+            self.stats_table.setRowCount(len(summary) + 1)  # + 전체 합계 행
+            self.stats_table.setColumnCount(len(headers))
+            self.stats_table.setHorizontalHeaderLabels(headers)
 
-        # ---------- 테이블 설정 ----------
-        headers = ["부서명"] + [f"{g}등급" if g != "미분류" else "미분류" for g in grade_cols] + ["합계"]
-        self.stats_table.setRowCount(len(summary) + 1)  # + 전체 합계 행
-        self.stats_table.setColumnCount(len(headers))
-        self.stats_table.setHorizontalHeaderLabels(headers)
+            # 1) 일반 부서 데이터 삽입
+            for i, (dept, row) in enumerate(summary.iterrows()):
+                self.stats_table.setItem(i, 0, QTableWidgetItem(str(dept)))
+                for j, g in enumerate(grade_cols):
+                    self.stats_table.setItem(i, j + 1, QTableWidgetItem(str(int(row.get(g, 0)))))
+                self.stats_table.setItem(i, len(headers) - 1, QTableWidgetItem(str(int(row.get("합계", 0)))))
 
-        # 1) 일반 부서 데이터 삽입
-        for i, (dept, row) in enumerate(summary.iterrows()):
-            self.stats_table.setItem(i, 0, QTableWidgetItem(str(dept)))
+            # 2) 전체 합계 행 계산 및 삽입
+            total_row_idx = len(summary)
+            total_count = int(summary["합계"].sum())
+
+            item_total_label = QTableWidgetItem("전체 합계")
+            font = item_total_label.font(); font.setBold(True); item_total_label.setFont(font)
+            
+            item_total_label.setForeground(QColor("#2563EB"))
+            self.stats_table.setItem(total_row_idx, 0, item_total_label)
+
+            # 등급별 합계 + 비율 표시
             for j, g in enumerate(grade_cols):
-                self.stats_table.setItem(i, j + 1, QTableWidgetItem(str(int(row.get(g, 0)))))
-            self.stats_table.setItem(i, len(headers) - 1, QTableWidgetItem(str(int(row.get("합계", 0)))))
+                grade_sum = int(summary[g].sum()) if g in summary.columns else 0
+                percentage = (grade_sum / total_count * 100) if total_count > 0 else 0
+                display_text = f"{grade_sum} ({percentage:.1f}%)"
 
-        # 2) 전체 합계 행 계산 및 삽입
-        total_row_idx = len(summary)
-        total_count = int(summary["합계"].sum())
+                item = QTableWidgetItem(display_text)
+                font = item.font(); font.setBold(True); item.setFont(font)
+                item.setForeground(QColor("#2563EB"))
+                self.stats_table.setItem(total_row_idx, j + 1, item)
 
-        item_total_label = QTableWidgetItem("전체 합계")
-        item_total_label.setFont(QFont("Arial", 10, QFont.Bold))
-        item_total_label.setForeground(QColor("#2563EB"))
-        self.stats_table.setItem(total_row_idx, 0, item_total_label)
+            # 총합(문서 수)
+            item_total_all = QTableWidgetItem(str(total_count))
+            font = item_total_all.font(); font.setBold(True); item_total_all.setFont(font)
+            item_total_all.setForeground(QColor("#2563EB"))
+            self.stats_table.setItem(total_row_idx, len(headers) - 1, item_total_all)
 
-        # 등급별 합계 + 비율 표시
-        for j, g in enumerate(grade_cols):
-            grade_sum = int(summary[g].sum()) if g in summary.columns else 0
-            percentage = (grade_sum / total_count * 100) if total_count > 0 else 0
-            display_text = f"{grade_sum} ({percentage:.1f}%)"
+            self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-            item = QTableWidgetItem(display_text)
-            item.setFont(QFont("Arial", 10, QFont.Bold))
-            item.setForeground(QColor("#2563EB"))
-            self.stats_table.setItem(total_row_idx, j + 1, item)
+            # ---------- 하단 카드 요약 정보 업데이트 ----------
+            self.card_total.val_label.setText(f"{total_count}건")
 
-        # 총합(문서 수)
-        item_total_all = QTableWidgetItem(str(total_count))
-        item_total_all.setFont(QFont("Arial", 10, QFont.Bold))
-        item_total_all.setForeground(QColor("#2563EB"))
-        self.stats_table.setItem(total_row_idx, len(headers) - 1, item_total_all)
+            # 최상위 등급 비율: 알파벳 등급이 있으면 가장 앞(보통 A)
+            top_grade = None
+            for g in grade_cols:
+                if len(str(g)) == 1 and str(g).isalpha():
+                    top_grade = g
+                    break
+            if top_grade is not None and total_count > 0:
+                self.card_a_ratio.val_label.setText(f"{(summary[top_grade].sum() / total_count * 100):.1f}%")
+            else:
+                self.card_a_ratio.val_label.setText("0%")
 
-        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            # 최다 분류 부서
+            if len(summary) > 0:
+                self.card_top_dept.val_label.setText(f"{summary['합계'].idxmax()}")
+            else:
+                self.card_top_dept.val_label.setText("-")
 
-        # ---------- 하단 카드 요약 정보 업데이트 ----------
-        self.card_total.val_label.setText(f"{total_count}건")
+            # 미분류 문서 수
+            pending = int(summary["미분류"].sum()) if "미분류" in summary.columns else 0
+            self.card_pending.val_label.setText(f"{pending}건")
 
-        # 최상위 등급 비율: 알파벳 등급이 있으면 가장 앞(보통 A), 없으면 0%
-        top_grade = None
-        for g in grade_cols:
-            if len(str(g)) == 1 and str(g).isalpha():
-                top_grade = g
-                break
-        if top_grade is not None and total_count > 0:
-            self.card_a_ratio.val_label.setText(f"{(summary[top_grade].sum() / total_count * 100):.1f}%")
-        else:
-            self.card_a_ratio.val_label.setText("0%")
-
-        # 최다 분류 부서
-        if len(summary) > 0:
-            self.card_top_dept.val_label.setText(f"{summary['합계'].idxmax()}")
-        else:
-            self.card_top_dept.val_label.setText("-")
-
-        # 미분류 문서 수
-        pending = int(summary["미분류"].sum()) if "미분류" in summary.columns else 0
-        self.card_pending.val_label.setText(f"{pending}건")
-
-        self.content_stack.setCurrentIndex(1)
+            self.content_stack.setCurrentIndex(1)
+            return
 
     def select_card(self, card):
         self.card_keyword.selected = self.card_ml.selected = False; card.selected = True
@@ -1204,10 +1263,11 @@ class MainWindow(QMainWindow):
 
     def go_to_config(self):
         if self.selected_mode == "키워드 방식":
-            self.config_title.setText("🔍 키워드 기반 예측")
+            self.config_title.setText(" 키워드 기반 예측")
             self.kw_container.setVisible(True)
+            self.seed_default_keyword_rows()
         else:
-            self.config_title.setText("🧠 머신러닝 기반 예측")
+            self.config_title.setText(" 머신러닝 기반 예측")
             self.kw_container.setVisible(False)
         self.central_stacked.setCurrentIndex(1)
         self.content_stack.setCurrentIndex(0)
@@ -1217,7 +1277,7 @@ class MainWindow(QMainWindow):
         if not path: return
         
         try:
-            # 1. 파일 읽기 (인코딩 설정)
+            # 인코딩 설정
             if path.endswith('.csv'):
                 enc = "cp949" if self.rb_cp949.isChecked() else "utf-8-sig"
                 df = pd.read_csv(path, encoding=enc, engine='python', sep=None, on_bad_lines='skip')
@@ -1228,7 +1288,7 @@ class MainWindow(QMainWindow):
                 # 컬럼명 공백 제거
                 df.columns = [str(c).strip() for c in df.columns]
 
-                # 2. 괄호 내용 제거 여부 확인
+                # 괄호 내용 제거 여부 확인
                 reply = QMessageBox.question(
                     self, "데이터 전처리", 
                     "불러온 데이터에서 소괄호 ( ) 안의 내용을 모두 삭제하시겠습니까?",
@@ -1236,10 +1296,7 @@ class MainWindow(QMainWindow):
                 )
 
                 if reply == QMessageBox.Yes:
-                    # 모든 문자열 컬럼에 대해 정규식 적용
-                    # r'\(.*?\)' : 괄호와 그 안의 최소한의 문자들을 매칭
                     df = df.applymap(lambda x: re.sub(r'\(.*?\)', '', str(x)).strip() if pd.notnull(x) else x)
-                    # 처리 후 컬럼명에서도 괄호 제거 (필요한 경우)
                     df.columns = [re.sub(r'\(.*?\)', '', c).strip() for c in df.columns]
 
                 self.current_df = df
@@ -1248,8 +1305,11 @@ class MainWindow(QMainWindow):
                 # 버튼 상태 및 결과 데이터 초기화
                 self.final_df = None
                 self.analyze_btn.setEnabled(True)
-                self.analyze_btn.setText("🚀 분석 및 예측 시작")
-                self.analyze_btn.setStyleSheet("background-color: #059669; color: white; font-weight: bold; border-radius: 8px;")
+                self.analyze_btn.setText("분석 및 예측 시작")
+                self.analyze_btn.setStyleSheet("""
+                    QPushButton { background-color: #2563EB; color: white; font-weight: bold; border-radius: 8px; }
+                    QPushButton:hover { background-color: #234DAA; }
+                """)
                 
                 try: self.analyze_btn.clicked.disconnect()
                 except: pass
@@ -1279,7 +1339,6 @@ class MainWindow(QMainWindow):
         return grades if grades else ["A", "B", "C", "D"]
 
     def refresh_grade_comboboxes(self):
-        """현재 등급 목록에 맞춰 키워드 테이블의 콤보박스를 갱신합니다(기존 선택 유지)."""
         grades = self.get_grade_list()
         for r in range(self.kw_table.rowCount()):
             cb = self.kw_table.cellWidget(r, 1)
@@ -1300,12 +1359,30 @@ class MainWindow(QMainWindow):
         cb.setEditable(True)
         cb.addItems(self.get_grade_list())
         self.kw_table.setCellWidget(r, 1, cb)
+
+    def seed_default_keyword_rows(self):
+        if getattr(self, "_kw_default_seeded", False):
+            return
+        if not hasattr(self, "kw_table") or self.kw_table is None:
+            return
+        if self.kw_table.rowCount() > 0:
+            self._kw_default_seeded = True
+            return
+
+        for g in ["A", "B", "C", "D"]:
+            self.add_kw_row()
+            r = self.kw_table.rowCount() - 1
+            cb = self.kw_table.cellWidget(r, 1)
+            if isinstance(cb, QComboBox):
+                cb.setCurrentText(g)
+
+        self._kw_default_seeded = True
+
     def del_kw_row(self):
         curr = self.kw_table.currentRow()
         if curr >= 0: self.kw_table.removeRow(curr)
 
     def load_keywords_file(self):
-        """엑셀/CSV로 키워드-등급을 한 번에 불러옵니다. (컬럼: 키워드/등급 권장)"""
         path, _ = QFileDialog.getOpenFileName(self, "키워드 파일 열기", "", "Excel/CSV (*.xlsx *.xls *.csv)")
         if not path:
             return
@@ -1362,7 +1439,7 @@ class MainWindow(QMainWindow):
 
             # 업로드 파일 기준으로 등급목록
             if hasattr(self, "grade_order_edit") and self.grade_order_edit is not None:
-                # 파일에서 등장한 등급만 유니크하게 추출
+                # 파일에서 등장한 등급만 추출
                 unique_grades = []
                 seen = set()
                 for g in grades_in_file:
@@ -1372,7 +1449,7 @@ class MainWindow(QMainWindow):
                     seen.add(g)
                     unique_grades.append(g)
 
-                # 정렬 q등급" 같은 것은 숫자순, 그 외는 문자열/알파벳순
+                # 정렬 숫자순, 그 외는 문자열/알파벳순
                 def grade_sort_key(x: str):
                     x = str(x).strip()
                     m = re.match(r"^\s*(\d+)\s*등급\s*$", x)
@@ -1474,10 +1551,8 @@ class MainWindow(QMainWindow):
         
         self.final_df = df
         
-        # 현재 페이지 미리보기 테이블
         self.display_df_on_table(self.preview_table, self.final_df)
         
-        # 결과 탭(대시보드 옆 탭) 데이터 채우기
         self.res_table.setRowCount(len(df))
         self.res_table.setColumnCount(len(df.columns))
         self.res_table.setHorizontalHeaderLabels(df.columns)
@@ -1488,16 +1563,18 @@ class MainWindow(QMainWindow):
                 col_name = df.columns[j]
                 item = QTableWidgetItem(str(val))
                 
-                # 최종 예측 결과 강조 스타일
                 if col_name == '최종 예측 결과':
                     item.setFont(QFont("Arial", 10, QFont.Bold))
-                    item.setForeground(QColor("#059669") if "(머신러닝)" in str(val) else QColor("#2563EB"))
+                    item.setForeground(QColor("#2563EB") if "(머신러닝)" in str(val) else QColor("#2563EB"))
                 
                 self.res_table.setItem(i, j, item)
 
         # 버튼 상태 변경
-        self.analyze_btn.setText("📊 결과 엑셀 저장하기")
-        self.analyze_btn.setStyleSheet("background-color: #2563EB; color: white; font-weight: bold; border-radius: 8px;")
+        self.analyze_btn.setText("결과 엑셀 저장하기")
+        self.analyze_btn.setStyleSheet("""
+            QPushButton { background-color: #2563EB; color: white; font-weight: bold; border-radius: 8px; }
+            QPushButton:hover { background-color: #234DAA; }
+        """)
         
         try: self.analyze_btn.clicked.disconnect()
         except: pass
@@ -1558,7 +1635,7 @@ class MainWindow(QMainWindow):
 
 
     def export_position_mapping(self):
-        """직위-등급 매핑표(extra_dict)를 엑셀(xlsx)로 내보냄"""
+        """직위-등급 매핑표(extra_dict)를 엑셀로 내보냄"""
         pos_df = self._collect_position_mapping_df()
 
         if pos_df is None or pos_df.empty:
@@ -1593,9 +1670,12 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "완료", "엑셀 파일이 저장되었습니다.")
 
 if __name__ == "__main__":  
-    myappid = 'mycompany.myproduct.subproduct.version' 
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    myappid = 'LeeWonjung-KwonSeulhee.Document_classification_system.v1' 
+    #ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     app = QApplication(sys.argv)
-    w = MainWindow() 
+    icon = QIcon(resource_path("assets/icon.ico"))
+    app.setWindowIcon(icon) 
+    w = MainWindow()
+    w.setWindowIcon(icon)
     w.show()
     sys.exit(app.exec())
