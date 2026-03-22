@@ -6,7 +6,7 @@
 
 모델 파일은 용량 제한으로 인해 GitHub 저장소에는 포함하지 않았으며, Release의 설치 파일에 포함되어 제공됩니다.
 
-최신버전: v1.0 [다운로드](https://github.com/wonjung-git/Document_classification_system/releases/tag/v3.1)
+최신버전: v3.1 [다운로드](https://github.com/wonjung-git/Document_classification_system/releases/tag/v3.1)
 
 ## v3.1 업데이트 내용
 ### 1. 파일 업로드 시 문서명 전처리 수정
